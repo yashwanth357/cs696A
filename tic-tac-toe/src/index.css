@@ -71,7 +71,7 @@ body {
   width: 34px;
 }
 
-.row:after {
+.board-row:after {
   clear: both;
   content: '';
   display: table;
