@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import db from "./db/connection.js";
+import redisClient from "./db/redis.js";
+import messageQueue from "./db/bull.js";
 
 const PORT = process.env.PORT || 8000;
 const app = express();
@@ -8,14 +10,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/restaurants/:id', function(req, res) {
+app.get('/restaurants/:id', async function(req, res) {
     const restaurant_id = req.params["id"];
-    db.collection("restaurants").findOne({
-        restaurant_id: restaurant_id,
-    })
-    .then(value => res.send(value))
-    .catch(() => res.status(500).send("Not Found"));
-});
+    const value = await redisClient.get(restaurant_id);
+    if (value) {
+    res.send({"cached": true, "value": JSON.parse(value)});
+    } else {
+    const dbValue = await db.collection("restaurants").findOne({
+    restaurant_id: restaurant_id,
+    });
+    if (dbValue) {
+    await redisClient.set(restaurant_id, JSON.stringify(dbValue));
+    res.send({"cached": false, "value": dbValue});
+    } else {
+    res.status(500).send("Not Found");
+    }
+    }
+    });
 
 app.post('/restaurants', function(req, res) {
     const restaurant_id = req.body['restaurant_id'];
@@ -33,16 +44,37 @@ app.post('/restaurants', function(req, res) {
         res.status(500).send("Failed")
     ).catch(() => res.status(500).send("Failed"));
 });
-
-app.delete('/restaurants/:id', function(req, res) {
+app.put('/restaurants/:id', async function(req, res) {
     const restaurant_id = req.params["id"];
-    db.collection("restaurants").deleteOne({
-        restaurant_id: restaurant_id,
-    }).then(result => result.acknowledged && result.deletedCount >= 1 ?
-        res.send("Success") :
-        res.status(500).send("Failed")
-    ).catch(() => res.status(500).send("Not Found"));
+    const updates = req.body["updates"];
+    messageQueue.add({
+        restaurant_id: restaurant_id, 
+        updates: JSON.stringify(updates)
+    });
+    res.send("Message Queued");
 });
+
+app.delete('/restaurants/:id', async function(req, res) {
+    const restaurant_id = req.params["id"];
+    
+    const cachedValue = await redisClient.get(restaurant_id);
+    
+    if (cachedValue) {
+        await redisClient.del(restaurant_id);
+    }
+    
+    const result = await db.collection("restaurants").deleteOne({
+        restaurant_id: restaurant_id,
+    });
+    
+    if (result.deletedCount > 0) {
+        res.send({"success": true, "message": "Restaurant deleted successfully."});
+    } else {
+        res.status(404).send({"success": false, "message": "Restaurant not found."});
+    }
+});
+
+
 
 // New route to retrieve restaurants by borough and cuisine
 app.get('/restaurants', function(req, res) {
